@@ -16,6 +16,107 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_wifi.h"
+#include "mqtt_client.h"
+#include "input_header.h"
+
+#define TAG "MQTT"
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    // ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id= %d", base, event_id);
+    esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        msg_id = esp_mqtt_client_subscribe(client, "/device/pub/ID=0002", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        ESP_LOGI(TAG, "sent publish successful");
+        break;
+    case MQTT_EVENT_UNSUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGI(TAG, "Last error code reported from esp-tls: 0x%x", event->error_handle->esp_tls_last_esp_err);
+            ESP_LOGI(TAG, "Last tls stack error number: 0x%x", event->error_handle->esp_tls_stack_err);
+            ESP_LOGI(TAG, "Last captured errno : %d (%s)",  event->error_handle->esp_transport_sock_errno,
+                     strerror(event->error_handle->esp_transport_sock_errno));
+        } else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+            ESP_LOGI(TAG, "Connection refused error: 0x%x", event->error_handle->connect_return_code);
+        } else {
+            ESP_LOGW(TAG, "Unknown error type: 0x%x", event->error_handle->error_type);
+        }
+        break;
+    default:
+        ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+
+#define MQTT_BROKER_URI "mqtt://white-dev.aithings.vn:1883"
+ const esp_mqtt_client_config_t esp_mqtt_client_config = {
+        .broker = {
+            .address.uri= MQTT_BROKER_URI,
+            //.verification.certificate = "",
+        },
+        
+       // .credentials = {
+          //  .client_id = MQTT_CLIENT_ID,
+          //  .username  = MQTT_CLIENT_USERNAME,
+          //  .authentication.password = MQTT_CLIENT_PASSWORD,
+        //},
+    };
+
+
+esp_mqtt_client_handle_t client;
+/**
+ * @brief: Initialize MQTT configuration clinet
+*/
+void MQTT_client_init(void){
+    client = esp_mqtt_client_init(&esp_mqtt_client_config);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+}
+
+
+/**
+ * @brief: Publish topic to MQTT broker
+ * @param client: MQTT client handle
+ * @param TOPIC : Topic publish to MQTT
+ * @param QOS : quality of service, 1,2,3
+*/
+void mqtt_client_publish(char* TOPIC,int QOS, char *data){
+     if(QOS >= 0 && QOS <= 2){
+       esp_mqtt_client_publish(client,TOPIC,data,strlen(data),QOS,true);
+     }
+     else{
+        ESP_LOGE(TAG,"range of qos 0 or 1 or 2");
+     }
+}
+
+
+
+
 
 #define GATTC_TAG "GATTC_MULTIPLE_DEMO"
 #define REMOTE_SERVICE_UUID        0x00FF
@@ -70,7 +171,7 @@ static esp_ble_scan_params_t ble_scan_params = {
     .scan_filter_policy     = BLE_SCAN_FILTER_ALLOW_ALL,
     .scan_interval          = 0x50,
     .scan_window            = 0x30,
-    .scan_duplicate         = BLE_SCAN_DUPLICATE_ENABLE
+    .scan_duplicate         = BLE_SCAN_DUPLICATE_DISABLE
 };
 
 struct gattc_profile_inst {
@@ -144,8 +245,7 @@ void connid_handle(uint16_t id)
 static void start_scan(void)
 {
     stop_scan_done = false;
-    Isconnecting = false;
-    uint32_t duration = 10;
+    uint32_t duration = 30;
     esp_ble_gap_start_scanning(duration);
 }
 
@@ -160,6 +260,7 @@ static void gattc_profile_a_event_handler(esp_gattc_cb_event_t event, esp_gatt_i
     case ESP_GATTC_REG_EVT:
         ESP_LOGI(GATTC_TAG, "REG_EVT_GATTC");
         esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
+        
         if (scan_ret){
             ESP_LOGE(GATTC_TAG, "set scan params error, error code = %x", scan_ret);
         }
@@ -171,7 +272,7 @@ static void gattc_profile_a_event_handler(esp_gattc_cb_event_t event, esp_gatt_i
     case ESP_GATTC_CONNECT_EVT:
         ESP_LOGI(GATTC_TAG, "Connect event");
         isConnecting = true;
-        start_scan();
+       // start_scan();
         
         break;
     case ESP_GATTC_OPEN_EVT:
@@ -179,7 +280,7 @@ static void gattc_profile_a_event_handler(esp_gattc_cb_event_t event, esp_gatt_i
         if (p_data->open.status != ESP_GATT_OK){
             //open failed, ignore the first device, connect the second device
             ESP_LOGE(GATTC_TAG, "connect device failed, status %d", p_data->open.status);
-           // start_scan();
+        //    start_scan();
             break;
         }
         
@@ -414,6 +515,10 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         //the unit of the duration is second
         // uint32_t duration = 20;
         // esp_ble_gap_start_scanning(duration);
+          //the unit of the duration is second
+          stop_scan_done = false;
+        uint32_t duration = 30;
+        esp_ble_gap_start_scanning(duration);
         break;
     }
     case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
@@ -436,8 +541,9 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             ESP_LOGI(GATTC_TAG, "Searched Device Name Len %d", adv_name_len);
             esp_log_buffer_char(GATTC_TAG, adv_name, adv_name_len);
             ESP_LOGI(GATTC_TAG, "\n");
-            if(scan_result->scan_rst.bda[0] == 0x08 && scan_result->scan_rst.bda[1] == 0xD1){
+            if(scan_result->scan_rst.bda[0] == 0x08 && scan_result->scan_rst.bda[1] == 0xd1){
             ESP_ERROR_CHECK(esp_ble_gap_stop_scanning());
+            stop_scan_done = true;
             
             
             esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if, scan_result->scan_rst.bda, scan_result->scan_rst.ble_addr_type, true);
@@ -505,6 +611,14 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
     } while (0);
 }
 
+void scan_request_callback(int gpio_num){
+    if(gpio_num == GPIO_NUM_0){
+        if(stop_scan_done == false){
+        start_scan();
+        }
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -513,6 +627,8 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK( ret );
+
+    
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
@@ -569,7 +685,12 @@ void app_main(void)
     if (ret){
         ESP_LOGE(GATTC_TAG, "set local  MTU failed, error code = %x", ret);
     }
-    start_scan();
+    input_io_create(GPIO_NUM_0, GPIO_INTR_falling);
+    input_callback_register(scan_request_callback);
+
+     esp_ble_gap_set_device_name("Gateway");
+     
+ //   MQTT_client_init();
 
 
 }

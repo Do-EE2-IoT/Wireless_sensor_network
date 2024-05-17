@@ -30,6 +30,8 @@
 #include "gatts_table_creat_demo.h"
 #include "esp_gatt_common_api.h"
 
+#include "driver/gpio.h"
+
 #include "driver/rtc_io.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -40,7 +42,11 @@
 #include "soc/soc_caps.h"
 
 #include "LM35_header.h"
-#include "input_header.h"
+#include "cpu_measure.h"
+
+#define LED_HIGH_TEMPERATURE GPIO_NUM_18
+#define LED_NORMAL_TEMPERATURE GPIO_NUM_19
+#define LED_LOW_TEMPERATURE GPIO_NUM_21
 
 
 #if SOC_RTC_FAST_MEM_SUPPORTED
@@ -51,18 +57,18 @@ static struct timeval sleep_enter_time;
 
 static void example_deep_sleep_register_rtc_timer_wakeup(void)
 {
-    const int wakeup_time_sec = 5;
+    const int wakeup_time_sec = 4;
     printf("Enabling timer wakeup, %ds\n", wakeup_time_sec);
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000));
 }
 
 
-#define GATTS_TABLE_TAG "GATTS_TABLE_DEMO"
+#define GATTS_TABLE_TAG "SENSOR NODE"
 
 #define PROFILE_NUM                 1
 #define PROFILE_APP_IDX             0
 #define ESP_APP_ID                  0x55
-#define SAMPLE_DEVICE_NAME          "ESP_GATTS_DEMO"
+#define SAMPLE_DEVICE_NAME          "SENSOR NODE"
 #define SVC_INST_ID                 0
 
 /* The max length of characteristic value. When the GATT client performs a write or prepare write operation,
@@ -98,7 +104,7 @@ static uint8_t raw_adv_data[] = {
         /* service uuid */
         0x03, 0x03, 0xFF, 0x00,
         /* device name */
-        0x0f, 0x09, 'E', 'S', 'P', '_', 'G', 'A', 'T', 'T', 'S', '_', 'D','E', 'M', 'O'
+        0x0f, 0x09, 'S', 'E', 'N', 'S', 'O', 'R', '_', 'N', 'O', 'D', 'E','W', 'S', 'N'
 };
 static uint8_t raw_scan_rsp_data[] = {
         /* flags */
@@ -259,6 +265,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             adv_config_done &= (~ADV_CONFIG_FLAG);
             if (adv_config_done == 0){
                 esp_ble_gap_start_advertising(&adv_params);
+                ESP_LOGI(GATTS_TABLE_TAG, "Start advertising");
             }
             break;
         case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT:
@@ -472,6 +479,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             conn_params.timeout = 400;    // timeout = 400*10ms = 4000ms
             //start sent the update connection parameters to the peer device.
             esp_ble_gap_update_conn_params(&conn_params);
+            xSemaphoreGive(Task_start_sem);
             break;
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_DISCONNECT_EVT, reason = 0x%x", param->disconnect.reason);
@@ -534,13 +542,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     } while (0);
 }
 
-void Input_callback(int gpio_num){
-     if(gpio_num == GPIO_NUM_0){
-        BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
-        xSemaphoreGiveFromISR(Task_start_sem, &pxHigherPriorityTaskWoken);
-     }
-}
-
+float temp_cel;
 TaskHandle_t Tem_handle;
 esp_err_t err_read_tem;
 esp_err_t err_indicate;
@@ -550,7 +552,8 @@ int send_indicate_timeout = 0;
 extern int adc_raw;
 void Temperature_Measurement_Task(void * parameter){
     ESP_LOGI(GATTS_TABLE_TAG, " Wait for semaphore Task start !");
-    // xSemaphoreTake(Task_start_sem, portMAX_DELAY);
+   xSemaphoreTake(Task_start_sem, portMAX_DELAY);
+   ESP_LOGI(GATTS_TABLE_TAG, "Successfully connect to Gateway");
     while(1){
         err_read_tem = LM35_read_data();
         if(err_read_tem == ESP_ERR_TIMEOUT){
@@ -563,8 +566,8 @@ void Temperature_Measurement_Task(void * parameter){
             }
             if(err_indicate == ESP_ERR_TIMEOUT) send_indicate_timeout ++;
             vTaskDelay(100/portTICK_PERIOD_MS);
-            }while(err_indicate != ESP_OK && send_indicate_timeout < 5);
-            if(send_indicate_timeout == 5){
+            }while(err_indicate != ESP_OK && send_indicate_timeout < 10);
+            if(send_indicate_timeout == 10){
                 // ring
             }
             send_indicate_timeout = 0;
@@ -572,6 +575,9 @@ void Temperature_Measurement_Task(void * parameter){
         }
         else{
             send_indicate_timeout = 0;
+            temp_cel = (adc_raw * 1500/4095)/10;
+            ESP_LOGI("Temperature : ", "%f", temp_cel ); 
+            
 
             if(adc_raw > 0 && adc_raw < 10){
                 temp = malloc(1 * sizeof(char));
@@ -602,16 +608,19 @@ void Temperature_Measurement_Task(void * parameter){
             // turn on led warning threshold
             esp_ble_gatts_send_indicate(heart_rate_profile_tab[0].gatts_if,heart_rate_profile_tab[0].conn_id,
             heart_rate_handle_table[IDX_CHAR_VAL_A],sizeof(temp),(uint8_t *)temp,false);
+            ESP_LOGI("Sensor Node :: ", "Start send message from sensor node");
         }
        
         // Wait for ack ... 5 time with timeout
         while(ble_send_time_out <= 10){
-        if(xSemaphoreTake(Ack_sem,2000/portTICK_PERIOD_MS) == pdFALSE){
+        if(xSemaphoreTake(Ack_sem,10000/portTICK_PERIOD_MS) == pdFALSE){
             ESP_LOGE(GATTS_TABLE_TAG, " Time out for ack, send again");
+            ESP_LOGI("Sensor Node :: ", "Start send message from sensor node");
             esp_ble_gatts_send_indicate(heart_rate_profile_tab[0].gatts_if,heart_rate_profile_tab[0].conn_id,
             heart_rate_handle_table[IDX_CHAR_VAL_A],sizeof(temp),(uint8_t *)temp,false);
             ble_send_time_out++;
         }else{
+            ESP_LOGI("Sensor node:: ", "Get ACK from gateway !");
             ESP_LOGI(GATTS_TABLE_TAG, "success for sending temperature value for gateway");
             ble_send_time_out = 0;
             break;
@@ -707,14 +716,11 @@ void app_main(void)
     }
     
 
-
-    input_io_create(GPIO_NUM_0, GPIO_INTR_falling);
-    input_callback_register(Input_callback);
     Ack_sem = xSemaphoreCreateBinary();
     Task_start_sem = xSemaphoreCreateBinary();
     LM35_init();
-
-    xTaskCreate(Temperature_Measurement_Task, "task",2048,NULL,1,&Tem_handle);
+    perfmon_start();
+    xTaskCreate(Temperature_Measurement_Task, "task",2048,NULL,2,&Tem_handle);
 
 }
 
